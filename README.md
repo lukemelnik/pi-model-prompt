@@ -11,7 +11,14 @@ Features:
 Install locally:
 - `pi install ~/projects/pi-extensions/model-prompt`
 
-Later, after publishing:
-- `pi install npm:pi-model-prompt`
+After publishing:
+- `pi install npm:@lukemelnik/pi-model-prompt`
+
+Release:
+- `npm run release:patch` or `npm run release:minor` or `npm run release:major`
+- `git push origin HEAD --follow-tags`
+- `npm run publish:release`
+
+`npm version` is the source of truth for releases here: it updates `package.json`, updates `package-lock.json`, creates a release commit, and creates a `vX.Y.Z` git tag.
 
 No build step is required. Pi loads `src/index.ts` directly.
