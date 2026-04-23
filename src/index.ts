@@ -16,7 +16,6 @@ import { dirname, join } from "node:path";
 import type { Api, Model } from "@mariozechner/pi-ai";
 import {
 	createEditToolDefinition,
-	defineTool,
 	DynamicBorder,
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -24,16 +23,18 @@ import {
 	type KeybindingsManager,
 	keyHint,
 	type Theme,
+	type ToolDefinition,
 } from "@mariozechner/pi-coding-agent";
 import {
 	type Component,
 	Container,
-	Editor,
-	type EditorTheme,
 	type Focusable,
 	Spacer,
 	Text,
 	type TUI,
+	truncateToWidth,
+	wrapTextWithAnsi,
+	visibleWidth,
 } from "@mariozechner/pi-tui";
 import { type Static, Type } from "@sinclair/typebox";
 
@@ -69,6 +70,8 @@ const MODEL_PROMPT_TOOL_GUIDELINES = [
 	"Call model_prompt_show before model_prompt_edit unless you already know the exact current contents.",
 	"Changes to a model prompt addendum apply on the next user prompt, not during the current turn.",
 ];
+
+const modelPromptShowSchema = Type.Object({});
 
 const modelPromptEditSchema = Type.Object({
 	edits: Type.Array(
@@ -178,32 +181,74 @@ function formatModelPromptBody(info: ModelPromptInfo): string {
 	return [`Current model: ${info.label}`, `Path: ${info.path}`, "", info.content].join("\n");
 }
 
-function createViewerEditorTheme(theme: Theme): EditorTheme {
-	return {
-		borderColor: (text: string) => theme.fg("borderMuted", text),
-		selectList: {
-			selectedPrefix: (text: string) => theme.fg("accent", text),
-			selectedText: (text: string) => theme.fg("accent", text),
-			description: (text: string) => theme.fg("muted", text),
-			scrollInfo: (text: string) => theme.fg("dim", text),
-			noMatch: (text: string) => theme.fg("warning", text),
-		},
-	};
+class PromptScrollView implements Component {
+	private readonly tui: TUI;
+	private readonly theme: Theme;
+	private readonly lines: string[];
+	private scrollOffset = 0;
+
+	constructor(tui: TUI, theme: Theme, body: string) {
+		this.tui = tui;
+		this.theme = theme;
+		this.lines = body.split("\n");
+	}
+
+	invalidate(): void {}
+
+	scrollBy(delta: number): void {
+		this.scrollOffset = Math.max(0, this.scrollOffset + delta);
+	}
+
+	page(direction: -1 | 1): void {
+		const pageSize = Math.max(5, Math.floor(this.tui.terminal.rows * 0.3));
+		this.scrollBy(direction * pageSize);
+	}
+
+	render(width: number): string[] {
+		const horizontal = this.theme.fg("borderMuted", "─");
+		const contentWidth = Math.max(1, width - 2);
+		const maxVisibleLines = Math.max(5, Math.floor(this.tui.terminal.rows * 0.3));
+		const wrappedLines = this.lines.flatMap((line) => {
+			if (line.length === 0) return [""];
+			const wrapped = wrapTextWithAnsi(line, contentWidth);
+			return wrapped.length > 0 ? wrapped : [""];
+		});
+		const maxScrollOffset = Math.max(0, wrappedLines.length - maxVisibleLines);
+		this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScrollOffset));
+		const visibleLines = wrappedLines.slice(this.scrollOffset, this.scrollOffset + maxVisibleLines);
+		const result: string[] = [];
+
+		if (this.scrollOffset > 0) {
+			const indicator = `─── ↑ ${this.scrollOffset} more `;
+			const remaining = Math.max(0, width - visibleWidth(indicator));
+			result.push(this.theme.fg("borderMuted", indicator + "─".repeat(remaining)));
+		} else {
+			result.push(horizontal.repeat(width));
+		}
+
+		for (const line of visibleLines) {
+			result.push(` ${truncateToWidth(line, contentWidth, "", true)} `);
+		}
+
+		const linesBelow = wrappedLines.length - (this.scrollOffset + visibleLines.length);
+		if (linesBelow > 0) {
+			const indicator = `─── ↓ ${linesBelow} more `;
+			const remaining = Math.max(0, width - visibleWidth(indicator));
+			result.push(this.theme.fg("borderMuted", indicator + "─".repeat(remaining)));
+		} else {
+			result.push(horizontal.repeat(width));
+		}
+
+		return result;
+	}
 }
 
 class PromptViewerComponent extends Container implements Focusable {
-	private readonly editor: Editor;
 	private readonly keybindings: KeybindingsManager;
+	private readonly scrollView: PromptScrollView;
 	private readonly onClose: () => void;
 
-	private _focused = false;
-	get focused(): boolean {
-		return this._focused;
-	}
-	set focused(value: boolean) {
-		this._focused = value;
-		this.editor.focused = value;
-	}
+	focused = false;
 
 	constructor(
 		tui: TUI,
@@ -216,6 +261,7 @@ class PromptViewerComponent extends Container implements Focusable {
 	) {
 		super();
 		this.keybindings = keybindings;
+		this.scrollView = new PromptScrollView(tui, theme, body);
 		this.onClose = onClose;
 
 		this.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
@@ -223,11 +269,7 @@ class PromptViewerComponent extends Container implements Focusable {
 		this.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
 		this.addChild(new Text(theme.fg("muted", subtitle), 1, 0));
 		this.addChild(new Spacer(1));
-
-		this.editor = new Editor(tui, createViewerEditorTheme(theme), { paddingX: 1 });
-		this.editor.setText(body);
-		this.addChild(this.editor);
-
+		this.addChild(this.scrollView);
 		this.addChild(new Spacer(1));
 		this.addChild(
 			new Text(
@@ -254,22 +296,20 @@ class PromptViewerComponent extends Container implements Focusable {
 			this.onClose();
 			return;
 		}
-
-		if (
-			this.keybindings.matches(data, "tui.editor.cursorUp") ||
-			this.keybindings.matches(data, "tui.editor.cursorDown") ||
-			this.keybindings.matches(data, "tui.editor.cursorLeft") ||
-			this.keybindings.matches(data, "tui.editor.cursorRight") ||
-			this.keybindings.matches(data, "tui.editor.cursorWordLeft") ||
-			this.keybindings.matches(data, "tui.editor.cursorWordRight") ||
-			this.keybindings.matches(data, "tui.editor.cursorLineStart") ||
-			this.keybindings.matches(data, "tui.editor.cursorLineEnd") ||
-			this.keybindings.matches(data, "tui.editor.pageUp") ||
-			this.keybindings.matches(data, "tui.editor.pageDown") ||
-			this.keybindings.matches(data, "tui.editor.jumpForward") ||
-			this.keybindings.matches(data, "tui.editor.jumpBackward")
-		) {
-			this.editor.handleInput(data);
+		if (this.keybindings.matches(data, "tui.editor.cursorUp")) {
+			this.scrollView.scrollBy(-1);
+			return;
+		}
+		if (this.keybindings.matches(data, "tui.editor.cursorDown")) {
+			this.scrollView.scrollBy(1);
+			return;
+		}
+		if (this.keybindings.matches(data, "tui.editor.pageUp")) {
+			this.scrollView.page(-1);
+			return;
+		}
+		if (this.keybindings.matches(data, "tui.editor.pageDown")) {
+			this.scrollView.page(1);
 		}
 	}
 }
@@ -290,6 +330,17 @@ async function showModelPromptViewer(ctx: ExtensionContext, info: ModelPromptInf
 			() => done(undefined),
 		);
 	});
+}
+
+async function showModelPromptEditor(ctx: ExtensionContext, info: ModelPromptInfo): Promise<string | undefined> {
+	if (!ctx.hasUI) {
+		throw new Error("/model-prompt edit requires interactive or RPC UI support.");
+	}
+
+	return ctx.ui.editor(
+		info.hasContent ? `Edit global model prompt for ${info.label}` : `Create global model prompt for ${info.label}`,
+		info.content,
+	);
 }
 
 async function updateStatus(ctx: ExtensionContext, model: Model<Api> | undefined): Promise<void> {
@@ -390,14 +441,20 @@ async function applyToolEdits(
 	};
 }
 
-const modelPromptShowTool = defineTool({
+const modelPromptShowTool: ToolDefinition<typeof modelPromptShowSchema, ModelPromptShowDetails> = {
 	name: "model_prompt_show",
 	label: "Model Prompt Show",
 	description: "Show the current global model-specific prompt addendum for the active model.",
 	promptSnippet: "Inspect the current model-specific prompt addendum for the active model",
 	promptGuidelines: MODEL_PROMPT_TOOL_GUIDELINES,
-	parameters: Type.Object({}),
-	async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+	parameters: modelPromptShowSchema,
+	async execute(
+		_toolCallId: string,
+		_params: {},
+		_signal: AbortSignal | undefined,
+		_onUpdate: unknown,
+		ctx: ExtensionContext,
+	) {
 		const info = requireModelPromptInfo(await loadModelPromptInfo(ctx.model));
 		return {
 			content: [{ type: "text", text: buildShowToolText(info) }],
@@ -410,9 +467,9 @@ const modelPromptShowTool = defineTool({
 			} satisfies ModelPromptShowDetails,
 		};
 	},
-});
+};
 
-const modelPromptEditTool = defineTool({
+const modelPromptEditTool: ToolDefinition<typeof modelPromptEditSchema, ModelPromptEditDetails> = {
 	name: "model_prompt_edit",
 	label: "Model Prompt Edit",
 	description:
@@ -420,38 +477,35 @@ const modelPromptEditTool = defineTool({
 	promptSnippet: "Edit the current model-specific prompt addendum for the active model using exact text replacement",
 	promptGuidelines: MODEL_PROMPT_TOOL_GUIDELINES,
 	parameters: modelPromptEditSchema,
-	async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+	async execute(
+		_toolCallId: string,
+		params: ModelPromptEditInput,
+		signal: AbortSignal | undefined,
+		_onUpdate: unknown,
+		ctx: ExtensionContext,
+	) {
 		const info = requireModelPromptInfo(await loadModelPromptInfo(ctx.model));
 		return applyToolEdits(info, params, ctx, signal);
 	},
-});
+};
 
 export default function modelPromptExtension(pi: ExtensionAPI) {
 	pi.registerTool(modelPromptShowTool);
 	pi.registerTool(modelPromptEditTool);
 
 	pi.registerCommand("model-prompt", {
-		description: "Show, edit, or clear the current global model prompt addendum",
+		description: "Edit, show, or clear the current global model prompt addendum",
 		handler: async (args, ctx) => {
 			const info = requireModelPromptInfo(await loadModelPromptInfo(ctx.model));
 			const subcommand = args.trim();
 
-			if (subcommand === "" || subcommand === "show") {
+			if (subcommand === "show") {
 				await showModelPromptViewer(ctx, info);
 				return;
 			}
 
-			if (subcommand === "edit") {
-				if (!ctx.hasUI) {
-					throw new Error("/model-prompt edit requires interactive or RPC UI support.");
-				}
-
-				const result = await ctx.ui.editor(
-					info.hasContent
-						? `Edit global model prompt for ${info.label}`
-						: `Create global model prompt for ${info.label}`,
-					info.content,
-				);
+			if (subcommand === "" || subcommand === "edit") {
+				const result = await showModelPromptEditor(ctx, info);
 				if (result === undefined) {
 					ctx.ui.notify("Cancelled", "info");
 					return;
@@ -506,7 +560,7 @@ export default function modelPromptExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			ctx.ui.notify("Usage: /model-prompt [show|edit|clear]", "warning");
+			ctx.ui.notify("Usage: /model-prompt [edit|show|clear]", "warning");
 		},
 	});
 
