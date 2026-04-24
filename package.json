@@ -1,7 +1,7 @@
 {
   "name": "@lukemelnik/pi-model-prompt",
   "version": "0.1.0",
-  "description": "A Pi extension for global per-model prompt addenda and model prompt tools.",
+  "description": "Custom prompts per model in Pi.",
   "type": "module",
   "author": "Luke Melnik",
   "license": "MIT",

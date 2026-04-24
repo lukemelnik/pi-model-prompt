@@ -1,11 +1,11 @@
 /**
  * Model Prompt Extension
  *
- * Adds a global, per-model prompt addendum stored under:
+ * Adds a global custom prompt per model stored under:
  *   ~/.pi/agent/model-prompts/<provider>/<encoded-model-id>.md
  *
  * Features:
- * - Appends the current model's addendum in before_agent_start
+ * - Applies the current model's custom prompt in before_agent_start
  * - /model-prompt show|edit|clear for manual management
  * - model_prompt_show and model_prompt_edit tools so the model can inspect/update
  *   its own model-specific instructions when the user explicitly asks
@@ -68,7 +68,7 @@ interface ModelPromptEditDetails {
 const MODEL_PROMPT_TOOL_GUIDELINES = [
 	"Use model prompt tools only when the user explicitly asks to inspect or modify model-specific behavior.",
 	"Call model_prompt_show before model_prompt_edit unless you already know the exact current contents.",
-	"Changes to a model prompt addendum apply on the next user prompt, not during the current turn.",
+	"Changes to a custom model prompt apply on the next user prompt, not during the current turn.",
 ];
 
 const modelPromptShowSchema = Type.Object({});
@@ -163,7 +163,7 @@ function formatModelPromptBody(info: ModelPromptInfo): string {
 			`Current model: ${info.label}`,
 			`Path: ${info.path}`,
 			"",
-			"No model-specific prompt addendum exists yet.",
+			"No custom prompt exists for this model yet.",
 			"",
 			"Create one with /model-prompt edit or the model_prompt_edit tool.",
 		].join("\n");
@@ -355,7 +355,7 @@ async function updateStatus(ctx: ExtensionContext, model: Model<Api> | undefined
 function buildShowToolText(info: ModelPromptInfo): string {
 	if (!info.exists) {
 		return [
-			`No model-specific prompt addendum exists for ${info.label}.`,
+			`No custom prompt exists for ${info.label}.`,
 			`Path: ${info.path}`,
 			"Create one with model_prompt_edit using a single edit whose oldText is an empty string.",
 		].join("\n");
@@ -363,12 +363,12 @@ function buildShowToolText(info: ModelPromptInfo): string {
 
 	if (!info.hasContent) {
 		return [
-			`The model-specific prompt addendum file for ${info.label} exists but is empty.`,
+			`The custom prompt file for ${info.label} exists but is empty.`,
 			`Path: ${info.path}`,
 		].join("\n");
 	}
 
-	return [`Model-specific prompt addendum for ${info.label}:`, `Path: ${info.path}`, "", info.content].join("\n");
+	return [`Custom prompt for ${info.label}:`, `Path: ${info.path}`, "", info.content].join("\n");
 }
 
 async function applyToolEdits(
@@ -389,7 +389,7 @@ async function applyToolEdits(
 
 		const newContent = params.edits[0].newText;
 		if (newContent.trim().length === 0) {
-			throw new Error("Cannot create an empty model prompt addendum.");
+			throw new Error("Cannot create an empty custom model prompt.");
 		}
 
 		await saveModelPrompt(info, newContent);
@@ -398,7 +398,7 @@ async function applyToolEdits(
 			content: [
 				{
 					type: "text",
-					text: `Created model prompt addendum for ${info.label} at ${info.path}. Changes apply on the next user prompt.`,
+					text: `Created custom model prompt for ${info.label} at ${info.path}. Changes apply on the next user prompt.`,
 				},
 			],
 			details: {
@@ -411,7 +411,7 @@ async function applyToolEdits(
 	}
 
 	if (params.edits.some((edit) => edit.oldText.length === 0)) {
-		throw new Error("Empty oldText is only allowed when creating a brand new model prompt addendum.");
+		throw new Error("Empty oldText is only allowed when creating a brand new custom model prompt.");
 	}
 
 	const editTool = createEditToolDefinition(ctx.cwd);
@@ -444,8 +444,8 @@ async function applyToolEdits(
 const modelPromptShowTool: ToolDefinition<typeof modelPromptShowSchema, ModelPromptShowDetails> = {
 	name: "model_prompt_show",
 	label: "Model Prompt Show",
-	description: "Show the current global model-specific prompt addendum for the active model.",
-	promptSnippet: "Inspect the current model-specific prompt addendum for the active model",
+	description: "Show the current custom prompt for the active model.",
+	promptSnippet: "Inspect the current custom prompt for the active model",
 	promptGuidelines: MODEL_PROMPT_TOOL_GUIDELINES,
 	parameters: modelPromptShowSchema,
 	async execute(
@@ -473,8 +473,8 @@ const modelPromptEditTool: ToolDefinition<typeof modelPromptEditSchema, ModelPro
 	name: "model_prompt_edit",
 	label: "Model Prompt Edit",
 	description:
-		"Edit the current global model-specific prompt addendum for the active model using exact text replacement. When the file does not exist yet, create it with exactly one edit whose oldText is an empty string.",
-	promptSnippet: "Edit the current model-specific prompt addendum for the active model using exact text replacement",
+		"Edit the current custom prompt for the active model using exact text replacement. When the file does not exist yet, create it with exactly one edit whose oldText is an empty string.",
+	promptSnippet: "Edit the current custom prompt for the active model using exact text replacement",
 	promptGuidelines: MODEL_PROMPT_TOOL_GUIDELINES,
 	parameters: modelPromptEditSchema,
 	async execute(
@@ -494,7 +494,7 @@ export default function modelPromptExtension(pi: ExtensionAPI) {
 	pi.registerTool(modelPromptEditTool);
 
 	pi.registerCommand("model-prompt", {
-		description: "Edit, show, or clear the current global model prompt addendum",
+		description: "Edit, show, or clear the current custom model prompt",
 		handler: async (args, ctx) => {
 			const info = requireModelPromptInfo(await loadModelPromptInfo(ctx.model));
 			const subcommand = args.trim();
